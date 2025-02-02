@@ -58,6 +58,8 @@ A production-ready, scalable WebSocket server implementation in Go with support 
        ws.NewRedisStorage(redisAddr),
        config,
    )
+
+   go hub.Run()
    ```
 
 3. Define your WebSocket options including middleware, auth handlers, and error handlers:
