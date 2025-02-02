@@ -68,9 +68,6 @@ func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, co
 		processedMessages:  sync.Map{},
 	}
 
-	// Start the hub's event loop
-	go hub.Run()
-
 	return hub
 }
 
