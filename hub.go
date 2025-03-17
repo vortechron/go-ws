@@ -23,6 +23,8 @@ type Hub struct {
 	storage            StorageClient
 	brokerContexts     map[string]context.CancelFunc // Track broker subscriptions
 	processedMessages  sync.Map
+
+	shouldLogStats bool
 }
 
 // HubStats tracks important metrics
@@ -66,6 +68,7 @@ func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, co
 		storage:            storage,
 		brokerContexts:     make(map[string]context.CancelFunc),
 		processedMessages:  sync.Map{},
+		shouldLogStats:     config.ShouldLogStats,
 	}
 
 	return hub
@@ -188,8 +191,19 @@ func (h *Hub) handleBrokerMessages(channelName string, msgCh <-chan []byte) {
 				if id == client.UserID {
 					// Use a separate goroutine to send with timeout
 					go func(c *Client) {
+						broadcastBytes, err := json.Marshal(map[string]interface{}{
+							"channel":    broadcast.ChannelName,
+							"data":       json.RawMessage(broadcast.Data),
+							"sender_id":  broadcast.SenderID,
+							"timestamp":  broadcast.Timestamp.Format(time.RFC3339),
+							"message_id": broadcast.MessageID,
+						})
+						if err != nil {
+							log.Printf("[Hub] Error marshalling broadcast: %v", err)
+							return
+						}
 						select {
-						case c.send <- broadcast.Data:
+						case c.send <- broadcastBytes:
 							h.stats.incrementMessagesSent()
 						case <-time.After(writeWait):
 							// If we timeout, handle as slow client
@@ -294,6 +308,10 @@ func (h *Hub) cleanupStaleConnections() {
 func (h *Hub) logStats() {
 	h.stats.mu.RLock()
 	defer h.stats.mu.RUnlock()
+
+	if !h.shouldLogStats {
+		return
+	}
 
 	log.Printf("[Stats] Active: %d, Total: %d, Sent: %d, Received: %d, Errors: %d",
 		h.stats.activeConnections,

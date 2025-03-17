@@ -9,6 +9,7 @@ type Config struct {
 	RateLimit           RateLimit
 	MaxConnections      int
 	MaxConnectionsPerIP int
+	ShouldLogStats      bool
 }
 
 type RateLimit struct {

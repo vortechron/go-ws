@@ -1,6 +1,6 @@
 # Go WebSocket Server
 
-A production-ready, scalable WebSocket server implementation in Go with support for pub/sub channels, presence channels, and private channels.
+A simple WebSocket server implementation in Go with support for pub/sub channels, presence channels, and private channels inspired from Laravel Echo
 
 ## Features
 
@@ -44,6 +44,7 @@ A production-ready, scalable WebSocket server implementation in Go with support 
            Messages: 100,
            Interval: time.Minute,
        },
+       ShouldLogStats: true,
    }
    ```
 
