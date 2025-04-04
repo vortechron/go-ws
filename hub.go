@@ -23,6 +23,7 @@ type Hub struct {
 	storage            StorageClient
 	brokerContexts     map[string]context.CancelFunc // Track broker subscriptions
 	processedMessages  sync.Map
+	options            *Options
 
 	shouldLogStats bool
 }
@@ -47,6 +48,7 @@ type Subscription struct {
 // Broadcast is a message to all clients on a channel.
 type Broadcast struct {
 	ChannelName string    `json:"channel_name"`
+	Event       string    `json:"event"`
 	Data        []byte    `json:"data"`
 	SenderID    string    `json:"sender_id"`
 	Timestamp   time.Time `json:"timestamp"`
@@ -72,6 +74,79 @@ func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, co
 	}
 
 	return hub
+}
+
+// SetOptions sets the options for the hub
+func (h *Hub) SetOptions(options *Options) {
+	h.options = options
+}
+
+// sendWhisperToChannel sends a whisper event to all clients on a channel
+func (h *Hub) sendWhisperToChannel(whisper *WhisperEvent) {
+	channelName := whisper.ChannelName
+
+	// Verify the channel exists
+	h.mu.RLock()
+	clients, channelExists := h.channels[channelName]
+	h.mu.RUnlock()
+
+	if !channelExists {
+		if h.options != nil && h.options.ErrorHandler != nil {
+			h.options.ErrorHandler(&WhisperError{
+				Message: fmt.Sprintf("Channel %s not found", channelName),
+			})
+		}
+		return
+	}
+
+	message, err := json.Marshal(whisper)
+	if err != nil {
+		if h.options != nil && h.options.ErrorHandler != nil {
+			h.options.ErrorHandler(&WhisperError{
+				Message: fmt.Sprintf("Failed to marshal whisper: %v", err),
+			})
+		}
+		return
+	}
+
+	// Send to all clients in the channel
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	// Get all active clients for this channel from Redis
+	ctx := context.Background()
+	clientIDs, err := h.storage.GetChannelClients(ctx, channelName)
+	if err != nil {
+		log.Printf("[Hub] Error getting channel clients: %v", err)
+		return
+	}
+
+	for client := range clients {
+		// Skip the sender (optional, based on your requirements)
+		if client.UserID == whisper.FromID {
+			continue
+		}
+
+		// Skip if client is closing
+		if client.isClosing {
+			continue
+		}
+
+		// Only send if client is still subscribed according to Redis
+		for _, id := range clientIDs {
+			if id == client.UserID {
+				// Send the message in a non-blocking way
+				select {
+				case client.send <- message:
+					h.stats.incrementMessagesSent()
+				default:
+					// Handle slow client or buffer full
+					go h.handleSlowClient(client, channelName)
+				}
+				break
+			}
+		}
+	}
 }
 
 // Run starts the Hub's event loop.
@@ -192,11 +267,12 @@ func (h *Hub) handleBrokerMessages(channelName string, msgCh <-chan []byte) {
 					// Use a separate goroutine to send with timeout
 					go func(c *Client) {
 						broadcastBytes, err := json.Marshal(map[string]interface{}{
-							"channel":    broadcast.ChannelName,
-							"data":       json.RawMessage(broadcast.Data),
-							"sender_id":  broadcast.SenderID,
-							"timestamp":  broadcast.Timestamp.Format(time.RFC3339),
-							"message_id": broadcast.MessageID,
+							"channel_name": broadcast.ChannelName,
+							"data":         json.RawMessage(broadcast.Data),
+							"sender_id":    broadcast.SenderID,
+							"timestamp":    broadcast.Timestamp.Format(time.RFC3339),
+							"message_id":   broadcast.MessageID,
+							"event":        broadcast.Event,
 						})
 						if err != nil {
 							log.Printf("[Hub] Error marshalling broadcast: %v", err)

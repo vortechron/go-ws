@@ -8,6 +8,7 @@ export default {
 			channels: {
 				subscribed: new Set(),
 				listeners: {},
+				whispers: {}, // New container for whisper listeners
 			},
 			connected: false,
 		};
@@ -88,17 +89,23 @@ export default {
 			console.log("%cMessage received:", "color: purple", {
 				timestamp: new Date().toISOString(),
 				data: evt.data,
+        event: evt,
 			});
 
 			try {
 				const data = JSON.parse(evt.data);
+				const channel = data.channel_name;
+				const action = data.action;
+				const event = data.event;
 
-				const channel = data.channel;
-				const event = data.data.event;
+        console.log('Message data:', { channel, action, event, data });
 
-				// If the message has a channel and event, trigger the appropriate listeners
 				if (channel && event) {
-					this.triggerEvent(channel, event, data.data.data);
+					if (action === "whisper") {
+						this.triggerWhisperEvent(channel, event, data.data);
+					} else {
+						this.triggerEvent(channel, event, data.data);
+					}
 				}
 
 				// Emit a global message event
@@ -186,34 +193,7 @@ export default {
 		/**
 		 * Subscribe to a channel
 		 * @param {string} channel - The channel to subscribe to
-		 * @returns {object} - Channel object with listen method
-		 */
-		channel(channel) {
-			return this.subscribe(channel);
-		},
-
-		/**
-		 * Subscribe to a private channel
-		 * @param {string} channel - The private channel name without 'private-' prefix
-		 * @returns {object} - Channel object with listen method
-		 */
-		private(channel) {
-			return this.subscribe(`private-${channel}`);
-		},
-
-		/**
-		 * Subscribe to a presence channel
-		 * @param {string} channel - The presence channel name without 'presence-' prefix
-		 * @returns {object} - Channel object with listen method
-		 */
-		presence(channel) {
-			return this.subscribe(`presence-${channel}`);
-		},
-
-		/**
-		 * Subscribe to a channel
-		 * @param {string} channel - The channel to subscribe to
-		 * @returns {object} - Channel object with listen method
+		 * @returns {object} - Channel object with listen, listenForWhisper, and whisper methods
 		 */
 		subscribe(channel) {
 			// Add to subscribed channels set
@@ -223,17 +203,49 @@ export default {
 			if (!this.channels.listeners[channel]) {
 				this.channels.listeners[channel] = {};
 			}
+			// Initialize whisper listeners for this channel if not already done
+			if (!this.channels.whispers[channel]) {
+				this.channels.whispers[channel] = {};
+			}
 
 			// Send subscription if connected
 			if (this.connected) {
 				this.sendSubscription(channel);
 			}
 
-			// Return channel object with listen method
+			// Return channel object with listen, listenForWhisper, and whisper methods
 			return {
 				listen: (event, callback) => this.listen(channel, event, callback),
+				listenForWhisper: (event, callback) => this.listenForWhisper(channel, event, callback),
 				whisper: (event, data) => this.whisper(channel, event, data),
 			};
+		},
+
+		/**
+		 * Subscribe to a channel (alias for subscribe)
+		 * @param {string} channel - The channel to subscribe to
+		 * @returns {object} - Channel object with listen, listenForWhisper, and whisper methods
+		 */
+		channel(channel) {
+			return this.subscribe(channel);
+		},
+
+		/**
+		 * Subscribe to a private channel
+		 * @param {string} channel - The private channel name without 'private-' prefix
+		 * @returns {object} - Channel object with listen, listenForWhisper, and whisper methods
+		 */
+		private(channel) {
+			return this.subscribe(`private-${channel}`);
+		},
+
+		/**
+		 * Subscribe to a presence channel
+		 * @param {string} channel - The presence channel name without 'presence-' prefix
+		 * @returns {object} - Channel object with listen, listenForWhisper, and whisper methods
+		 */
+		presence(channel) {
+			return this.subscribe(`presence-${channel}`);
 		},
 
 		/**
@@ -260,7 +272,30 @@ export default {
 		},
 
 		/**
-		 * Trigger an event for all listeners
+		 * Listen for a whisper event on a channel
+		 * @param {string} channel - The channel to listen on
+		 * @param {string} event - The whisper event to listen for
+		 * @param {function} callback - The callback to execute when the whisper event is received
+		 * @returns {object} - The channel object for chaining
+		 */
+		listenForWhisper(channel, event, callback) {
+			if (!this.channels.whispers[channel]) {
+				this.channels.whispers[channel] = {};
+			}
+
+			if (!this.channels.whispers[channel][event]) {
+				this.channels.whispers[channel][event] = [];
+			}
+
+			this.channels.whispers[channel][event].push(callback);
+
+			return {
+				listenForWhisper: (nextEvent, nextCallback) => this.listenForWhisper(channel, nextEvent, nextCallback),
+			};
+		},
+
+		/**
+		 * Trigger an event for all regular listeners
 		 * @param {string} channel - The channel the event was received on
 		 * @param {string} event - The event name
 		 * @param {any} data - The event data
@@ -274,9 +309,23 @@ export default {
 		},
 
 		/**
-		 * Send a message to a channel
+		 * Trigger an event for all whisper listeners
+		 * @param {string} channel - The channel the whisper was received on
+		 * @param {string} event - The whisper event name
+		 * @param {any} data - The whisper event data
+		 */
+		triggerWhisperEvent(channel, event, data) {
+			if (this.channels.whispers[channel] && this.channels.whispers[channel][event]) {
+				this.channels.whispers[channel][event].forEach((callback) => {
+					callback(data);
+				});
+			}
+		},
+
+		/**
+		 * Send a whisper message to a channel
 		 * @param {string} channel - The channel to send to
-		 * @param {string} event - The event name
+		 * @param {string} event - The whisper event name
 		 * @param {any} data - The data to send
 		 * @returns {boolean} - Whether the message was sent
 		 */
@@ -297,8 +346,9 @@ export default {
 				return false;
 			}
 
+			// Send message with action "whisper"
 			const message = {
-				action: "broadcast",
+				action: "whisper",
 				channel: channel,
 				event: event,
 				data: data,
@@ -317,8 +367,9 @@ export default {
 				// Remove from subscribed channels
 				this.channels.subscribed.delete(channel);
 
-				// Remove all listeners
+				// Remove all listeners and whisper listeners
 				delete this.channels.listeners[channel];
+				delete this.channels.whispers[channel];
 
 				// Send unsubscribe message if connected
 				if (this.connected) {

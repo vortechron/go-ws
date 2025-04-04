@@ -7,6 +7,7 @@ A simple WebSocket server implementation in Go with support for pub/sub channels
 - WebSocket server with pub/sub capabilities
 - Support for private channels with authorization
 - Presence channels with join/leave events
+- Client-to-client whisper events within channels
 - Redis backend for scaling across multiple nodes
 - Automatic connection management and cleanup
 - Built-in statistics tracking
@@ -97,6 +98,16 @@ A simple WebSocket server implementation in Go with support for pub/sub channels
        OnDisconnect: func(client *ws.Client) {
            log.Printf("Client disconnected: %s", client.ID)
        },
+       
+       // Enable whisper functionality
+       EnableWhispers: true,
+       
+       // Optional whisper middleware for filtering or transforming whispers
+       WhisperMiddleware: func(whisper *ws.WhisperEvent) bool {
+           // Process the whisper event here
+           // Return false to block the whisper
+           return true
+       },
    }
    ```
 
@@ -167,6 +178,10 @@ A simple WebSocket server implementation in Go with support for pub/sub channels
            case "presence":
                console.log("Presence update:", data.users);
                break;
+           case "whisper":
+               console.log(`Whisper from ${data.from}, event: ${data.event}, channel: ${data.channel}`);
+               console.log("Whisper data:", data.data);
+               break;
            case "error":
                console.error("Error:", data.error);
                break;
@@ -185,6 +200,77 @@ A simple WebSocket server implementation in Go with support for pub/sub channels
    };
    ```
 
+## Using Whisper Events
+
+Whisper events allow clients to send events directly to other clients who are subscribed to the same channel without going through your application server. This is useful for features like typing indicators, read receipts, or any temporary client state that doesn't need to be stored.
+
+1. Send a whisper to a channel:
+
+   ```javascript
+   // Send a whisper to a channel
+   socket.send(JSON.stringify({
+       action: "whisper",
+       channel: "chat-room-1",  // Channel to whisper on
+       event: "typing",         // Custom event name
+       data: {                  // Custom data payload
+           isTyping: true
+       }
+   }));
+   ```
+
+2. Listen for whispers on the client:
+
+   ```javascript
+   // Using the onmessage handler from above
+   socket.onmessage = function(event) {
+       const data = JSON.parse(event.data);
+       
+       if (data.type === "whisper") {
+           // Handle specific whisper events
+           switch(data.event) {
+               case "typing":
+                   const isTyping = data.data.isTyping;
+                   console.log(`User ${data.from} is ${isTyping ? 'typing' : 'stopped typing'} in ${data.channel}`);
+                   updateTypingIndicator(data.from, isTyping, data.channel);
+                   break;
+                   
+               case "read":
+                   console.log(`User ${data.from} read your message in ${data.channel}`);
+                   updateReadStatus(data.from, data.channel);
+                   break;
+                   
+               default:
+                   console.log(`Received whisper from ${data.from} with event: ${data.event} in ${data.channel}`);
+                   console.log("Data:", data.data);
+           }
+       }
+   };
+   ```
+
+3. Server-side configuration (Go):
+
+   ```go
+   // Enable whisper functionality in options
+   options.EnableWhispers = true
+   
+   // Optional: Add whisper middleware for filtering or transforming whispers
+   options.WhisperMiddleware = func(whisper *ws.WhisperEvent) bool {
+       // You can modify the whisper event here
+       // Return false to block the whisper
+       
+       // Example: Log all whispers
+       log.Printf("Whisper from %s on channel %s: %s", 
+           whisper.FromID, whisper.ChannelName, whisper.Event)
+       
+       // Example: Block whispers with certain events
+       if whisper.Event == "blocked-event" {
+           return false
+       }
+       
+       return true
+   }
+   ```
+
 ## Error Handling
 
 The package provides comprehensive error handling:
@@ -199,6 +285,9 @@ options.ErrorHandler = func(err error) {
         // Handle rate limiting errors
     case *ws.ConnectionError:
         // Handle connection errors
+    case *ws.WhisperError:
+        // Handle whisper-related errors
+        log.Printf("Whisper error: %s", e.Message)
     default:
         // Handle other errors
     }

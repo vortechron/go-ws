@@ -9,14 +9,17 @@ import (
 // AuthorizationHandler is a function type for checking channel authorization.
 type AuthorizationHandler func(userID string, channelName string) bool
 type GetUserIDHandler func(r *http.Request) string
+type WhisperMiddlewareHandler func(whisper *WhisperEvent) bool
 
 type Options struct {
-	AuthHandler  AuthorizationHandler
-	GetUserID    GetUserIDHandler
-	ErrorHandler func(error)
-	Middleware   []Middleware
-	OnConnect    func(*Client)
-	OnDisconnect func(*Client)
+	AuthHandler       AuthorizationHandler
+	GetUserID         GetUserIDHandler
+	ErrorHandler      func(error)
+	Middleware        []Middleware
+	OnConnect         func(*Client)
+	OnDisconnect      func(*Client)
+	EnableWhispers    bool
+	WhisperMiddleware WhisperMiddlewareHandler
 }
 
 type Middleware interface {
@@ -25,6 +28,9 @@ type Middleware interface {
 
 // ServeWS handles WebSocket requests from clients.
 func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, options *Options) error {
+	// Set options on hub
+	hub.SetOptions(options)
+
 	// Apply middleware chain
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleWebSocket(hub, w, r, options)

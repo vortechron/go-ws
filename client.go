@@ -33,6 +33,16 @@ type PresenceMessage struct {
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// WhisperEvent represents a client-emitted event on a channel.
+type WhisperEvent struct {
+	Action      string                 `json:"action"`
+	ChannelName string                 `json:"channel_name"`
+	FromID      string                 `json:"from"`
+	Event       string                 `json:"event"`
+	Data        map[string]interface{} `json:"data"`
+	Timestamp   time.Time              `json:"timestamp"`
+}
+
 // readPump handles incoming messages from the WebSocket connection.
 func (c *Client) readPump() {
 	defer func() {
@@ -92,6 +102,50 @@ func (c *Client) readPump() {
 					Timestamp:   time.Now(),
 				}
 			}
+
+		case "whisper":
+			event, _ := msg["event"].(string)
+
+			// Validate channel and event
+			if channel == "" || event == "" {
+				if c.hub.options != nil && c.hub.options.ErrorHandler != nil {
+					c.hub.options.ErrorHandler(&WhisperError{Message: "Invalid whisper: missing channel or event"})
+				}
+				continue
+			}
+
+			// Check if whispers are enabled
+			if c.hub.options == nil || !c.hub.options.EnableWhispers {
+				continue
+			}
+
+			// Create whisper event
+			whisperEvt := &WhisperEvent{
+				Action:      "whisper", // duh
+				ChannelName: channel,
+				FromID:      c.UserID,
+				Event:       event,
+				Timestamp:   time.Now(),
+			}
+
+			// Extract data if present
+			if dataRaw != nil {
+				if dataMap, ok := dataRaw.(map[string]interface{}); ok {
+					whisperEvt.Data = dataMap
+				}
+			}
+
+			whisperEvt.Data["event"] = event
+
+			// Apply whisper middleware if configured
+			if c.hub.options.WhisperMiddleware != nil {
+				if !c.hub.options.WhisperMiddleware(whisperEvt) {
+					continue
+				}
+			}
+
+			// Send the whisper to the channel
+			c.hub.sendWhisperToChannel(whisperEvt)
 		}
 	}
 }
