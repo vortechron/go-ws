@@ -11,9 +11,22 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func NewClient(hub Hub, conn *websocket.Conn, send chan []byte, userID string, metadata map[string]interface{}, createdAt time.Time, lastSeen time.Time, authHandler AuthorizationHandler) *Client {
+	return &Client{
+		hub:         hub,
+		conn:        conn,
+		send:        send,
+		UserID:      userID,
+		Metadata:    metadata,
+		CreatedAt:   createdAt,
+		LastSeen:    lastSeen,
+		authHandler: authHandler,
+	}
+}
+
 // Client represents a single WebSocket connection.
 type Client struct {
-	hub         *Hub
+	hub         Hub
 	conn        *websocket.Conn
 	send        chan []byte
 	UserID      string
@@ -46,7 +59,11 @@ type WhisperEvent struct {
 // readPump handles incoming messages from the WebSocket connection.
 func (c *Client) readPump() {
 	defer func() {
-		c.hub.removeClientFromAllChannels(c)
+		c.hub.HandleUnsubscribe(Subscription{
+			ChannelName: "",
+			Client:      c,
+			Join:        false,
+		})
 		c.Close()
 	}()
 
@@ -58,6 +75,12 @@ func (c *Client) readPump() {
 		return nil
 	})
 
+	hubOptions := c.hub.GetOptions()
+	hubStats := c.hub.GetStats()
+	hubSubscribeChannel := c.hub.GetSubscribeChannel()
+	hubUnsubscribeChannel := c.hub.GetUnsubscribeChannel()
+	hubBroadcastChannel := c.hub.GetBroadcastChannel()
+
 	for {
 		var msg map[string]interface{}
 		if err := c.conn.ReadJSON(&msg); err != nil {
@@ -67,7 +90,7 @@ func (c *Client) readPump() {
 			break
 		}
 
-		c.hub.stats.incrementMessagesReceived()
+		hubStats.incrementMessagesReceived()
 		c.updateLastSeen()
 
 		action, _ := msg["action"].(string)
@@ -80,14 +103,14 @@ func (c *Client) readPump() {
 				fmt.Println("not authorized")
 				continue
 			}
-			c.hub.subscribe <- Subscription{
+			hubSubscribeChannel <- Subscription{
 				ChannelName: channel,
 				Client:      c,
 				Join:        true,
 			}
 
 		case "unsubscribe":
-			c.hub.unsubscribe <- Subscription{
+			hubUnsubscribeChannel <- Subscription{
 				ChannelName: channel,
 				Client:      c,
 				Join:        false,
@@ -95,7 +118,7 @@ func (c *Client) readPump() {
 
 		case "broadcast":
 			if data, err := json.Marshal(dataRaw); err == nil {
-				c.hub.Broadcast <- Broadcast{
+				hubBroadcastChannel <- Broadcast{
 					ChannelName: channel,
 					Data:        data,
 					SenderID:    c.UserID,
@@ -108,14 +131,14 @@ func (c *Client) readPump() {
 
 			// Validate channel and event
 			if channel == "" || event == "" {
-				if c.hub.options != nil && c.hub.options.ErrorHandler != nil {
-					c.hub.options.ErrorHandler(&WhisperError{Message: "Invalid whisper: missing channel or event"})
+				if hubOptions != nil && hubOptions.ErrorHandler != nil {
+					hubOptions.ErrorHandler(&WhisperError{Message: "Invalid whisper: missing channel or event"})
 				}
 				continue
 			}
 
 			// Check if whispers are enabled
-			if c.hub.options == nil || !c.hub.options.EnableWhispers {
+			if hubOptions == nil || !hubOptions.EnableWhispers {
 				continue
 			}
 
@@ -138,14 +161,14 @@ func (c *Client) readPump() {
 			whisperEvt.Data["event"] = event
 
 			// Apply whisper middleware if configured
-			if c.hub.options.WhisperMiddleware != nil {
-				if !c.hub.options.WhisperMiddleware(whisperEvt) {
+			if c.hub.GetOptions().WhisperMiddleware != nil {
+				if !c.hub.GetOptions().WhisperMiddleware(whisperEvt) {
 					continue
 				}
 			}
 
 			// Send the whisper to the channel
-			c.hub.sendWhisperToChannel(whisperEvt)
+			c.hub.SendWhisperToChannel(whisperEvt)
 		}
 	}
 }
@@ -202,7 +225,7 @@ func (c *Client) Close() {
 
 		// Remove from Redis
 		ctx := context.Background()
-		if err := c.hub.storage.RemoveClient(ctx, c.UserID); err != nil {
+		if err := c.hub.GetStorageClient().RemoveClient(ctx, c.UserID); err != nil {
 			log.Printf("[Client] Error removing client from Redis: %v", err)
 		}
 
@@ -218,7 +241,7 @@ func (c *Client) updateLastSeen() {
 	c.mu.Unlock()
 
 	ctx := context.Background()
-	if err := c.hub.storage.UpdateClientLastSeen(ctx, c.UserID); err != nil {
+	if err := c.hub.GetStorageClient().UpdateClientLastSeen(ctx, c.UserID); err != nil {
 		log.Printf("[Client] Error updating last seen: %v", err)
 	}
 }

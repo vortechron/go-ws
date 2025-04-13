@@ -9,8 +9,29 @@ import (
 	"time"
 )
 
+type Hub interface {
+	GetBroadcastChannel() chan Broadcast
+	GetSubscribeChannel() chan Subscription
+	GetUnsubscribeChannel() chan Subscription
+	GetMessageBroker() MessageBroker
+	GetStorageClient() StorageClient
+	GetBrokerContexts() map[string]context.CancelFunc
+	GetProcessedMessages() sync.Map
+	GetOptions() *Options
+	GetStats() HubStats
+	IncrementConnections()
+	DecrementConnections()
+	GetClientQueueSize() int
+	SendWhisperToChannel(whisper *WhisperEvent)
+	Run()
+	HandleSubscribe(sub Subscription)
+	HandleUnsubscribe(sub Subscription)
+	HandleBroadcast(b Broadcast)
+	HandleSlowClient(c *Client, channelName string)
+}
+
 // Hub manages all channels and routing events.
-type Hub struct {
+type DefaultHub struct {
 	mu                 sync.RWMutex
 	channels           map[string]map[*Client]bool
 	subscribe          chan Subscription
@@ -26,6 +47,81 @@ type Hub struct {
 	options            *Options
 
 	shouldLogStats bool
+}
+
+// Implement Hub interface methods for DefaultHub
+func (h *DefaultHub) GetBroadcastChannel() chan Broadcast {
+	return h.Broadcast
+}
+
+func (h *DefaultHub) GetSubscribeChannel() chan Subscription {
+	return h.subscribe
+}
+
+func (h *DefaultHub) GetUnsubscribeChannel() chan Subscription {
+	return h.unsubscribe
+}
+
+func (h *DefaultHub) GetMessageBroker() MessageBroker {
+	return h.messageBroker
+}
+
+func (h *DefaultHub) GetStorageClient() StorageClient {
+	return h.storage
+}
+
+func (h *DefaultHub) GetBrokerContexts() map[string]context.CancelFunc {
+	return h.brokerContexts
+}
+
+func (h *DefaultHub) GetProcessedMessages() sync.Map {
+	return h.processedMessages
+}
+
+func (h *DefaultHub) GetOptions() *Options {
+	return h.options
+}
+
+func (h *DefaultHub) GetStats() HubStats {
+	return h.stats
+}
+
+func (h *DefaultHub) GetClientQueueSize() int {
+	return h.clientQueueSize
+}
+
+func (h *DefaultHub) IncrementConnections() {
+	h.stats.mu.Lock()
+	h.stats.totalConnections++
+	h.stats.activeConnections++
+	h.stats.mu.Unlock()
+}
+
+func (h *DefaultHub) DecrementConnections() {
+	h.stats.mu.Lock()
+	h.stats.activeConnections--
+	h.stats.totalConnections--
+	h.stats.mu.Unlock()
+}
+
+func (h *DefaultHub) SendWhisperToChannel(whisper *WhisperEvent) {
+	h.sendWhisperToChannel(whisper)
+}
+
+func (h *DefaultHub) HandleSubscribe(sub Subscription) {
+	h.handleSubscribe(sub)
+}
+
+func (h *DefaultHub) HandleUnsubscribe(sub Subscription) {
+	h.handleUnsubscribe(sub)
+}
+
+func (h *DefaultHub) HandleBroadcast(b Broadcast) {
+	h.handleBroadcast(b)
+}
+
+func (h *DefaultHub) HandleSlowClient(c *Client, channelName string) {
+	h.handleSlowClient(c, channelName)
 }
 
 // HubStats tracks important metrics
@@ -57,8 +153,8 @@ type Broadcast struct {
 }
 
 // NewHub initializes a new Hub instance.
-func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, config Config) *Hub {
-	hub := &Hub{
+func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, config Config) *DefaultHub {
+	hub := &DefaultHub{
 		channels:           make(map[string]map[*Client]bool),
 		subscribe:          make(chan Subscription, 1000),
 		unsubscribe:        make(chan Subscription, 1000),
@@ -77,12 +173,12 @@ func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, co
 }
 
 // SetOptions sets the options for the hub
-func (h *Hub) SetOptions(options *Options) {
+func (h *DefaultHub) SetOptions(options *Options) {
 	h.options = options
 }
 
 // sendWhisperToChannel sends a whisper event to all clients on a channel
-func (h *Hub) sendWhisperToChannel(whisper *WhisperEvent) {
+func (h *DefaultHub) sendWhisperToChannel(whisper *WhisperEvent) {
 	channelName := whisper.ChannelName
 
 	// Verify the channel exists
@@ -150,7 +246,7 @@ func (h *Hub) sendWhisperToChannel(whisper *WhisperEvent) {
 }
 
 // Run starts the Hub's event loop.
-func (h *Hub) Run() {
+func (h *DefaultHub) Run() {
 	log.Println("[Run] Starting Hub event loop")
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -171,7 +267,7 @@ func (h *Hub) Run() {
 }
 
 // handleSubscribe processes subscription requests.
-func (h *Hub) handleSubscribe(sub Subscription) {
+func (h *DefaultHub) handleSubscribe(sub Subscription) {
 	// Store client info in Redis
 	clientInfo := &ClientInfo{
 		UserID:    sub.Client.UserID,
@@ -215,7 +311,7 @@ func (h *Hub) handleSubscribe(sub Subscription) {
 }
 
 // handleBrokerMessages processes messages from the broker for a specific channel
-func (h *Hub) handleBrokerMessages(channelName string, msgCh <-chan []byte) {
+func (h *DefaultHub) handleBrokerMessages(channelName string, msgCh <-chan []byte) {
 	for msg := range msgCh {
 		var broadcast Broadcast
 		if err := json.Unmarshal(msg, &broadcast); err != nil {
@@ -295,7 +391,7 @@ func (h *Hub) handleBrokerMessages(channelName string, msgCh <-chan []byte) {
 }
 
 // handleUnsubscribe processes unsubscription requests.
-func (h *Hub) handleUnsubscribe(sub Subscription) {
+func (h *DefaultHub) handleUnsubscribe(sub Subscription) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -317,7 +413,7 @@ func (h *Hub) handleUnsubscribe(sub Subscription) {
 }
 
 // handleBroadcast sends messages to the broker.
-func (h *Hub) handleBroadcast(b Broadcast) {
+func (h *DefaultHub) handleBroadcast(b Broadcast) {
 	// Generate a unique message ID if not present
 	if b.MessageID == "" {
 		b.MessageID = fmt.Sprintf("%s-%d", b.SenderID, time.Now().UnixNano())
@@ -335,7 +431,7 @@ func (h *Hub) handleBroadcast(b Broadcast) {
 }
 
 // handleSlowClient removes slow clients from a channel.
-func (h *Hub) handleSlowClient(c *Client, channelName string) {
+func (h *DefaultHub) handleSlowClient(c *Client, channelName string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -359,7 +455,7 @@ func (h *Hub) handleSlowClient(c *Client, channelName string) {
 }
 
 // cleanupStaleConnections removes clients that have been inactive for too long.
-func (h *Hub) cleanupStaleConnections() {
+func (h *DefaultHub) cleanupStaleConnections() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -381,7 +477,7 @@ func (h *Hub) cleanupStaleConnections() {
 }
 
 // logStats logs the current statistics of the Hub.
-func (h *Hub) logStats() {
+func (h *DefaultHub) logStats() {
 	h.stats.mu.RLock()
 	defer h.stats.mu.RUnlock()
 
@@ -398,7 +494,7 @@ func (h *Hub) logStats() {
 }
 
 // unsubscribeClientFromChannel removes a client from a specific channel.
-func (h *Hub) unsubscribeClientFromChannel(client *Client, channelName string) {
+func (h *DefaultHub) unsubscribeClientFromChannel(client *Client, channelName string) {
 	if clients, exists := h.channels[channelName]; exists {
 		if _, ok := clients[client]; ok {
 			delete(clients, client)
@@ -420,7 +516,7 @@ func (h *Hub) unsubscribeClientFromChannel(client *Client, channelName string) {
 }
 
 // broadcastPresenceJoin notifies all clients of a new presence join.
-func (h *Hub) broadcastPresenceJoin(sub Subscription) {
+func (h *DefaultHub) broadcastPresenceJoin(sub Subscription) {
 	// Check if client is already in the channel according to Redis
 	// ctx := context.Background()
 	// clients, err := h.storage.GetChannelClients(ctx, sub.ChannelName)
@@ -457,7 +553,7 @@ func (h *Hub) broadcastPresenceJoin(sub Subscription) {
 }
 
 // broadcastPresenceLeave notifies all clients of a presence leave.
-func (h *Hub) broadcastPresenceLeave(client *Client, channelName string) {
+func (h *DefaultHub) broadcastPresenceLeave(client *Client, channelName string) {
 	leaveMsg := PresenceMessage{
 		Event:     "presence:leave",
 		UserID:    client.UserID,
@@ -477,7 +573,7 @@ func (h *Hub) broadcastPresenceLeave(client *Client, channelName string) {
 }
 
 // removeClientFromAllChannels removes a client from all channels.
-func (h *Hub) removeClientFromAllChannels(c *Client) {
+func (h *DefaultHub) removeClientFromAllChannels(c *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

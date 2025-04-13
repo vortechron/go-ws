@@ -347,6 +347,72 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
+## Using with Fiber Framework
+
+If you're using the [Fiber web framework](https://github.com/gofiber/fiber/v2), you can use the provided Fiber adapter:
+
+1. First, install the required dependencies:
+
+  ```
+  go get github.com/gofiber/fiber/v2
+  go get github.com/gofiber/websocket/v2
+  ```
+
+2. Create a new Fiber app and set up the WebSocket endpoint:
+
+  ```go
+  package main
+
+  import (
+    "context"
+    "time"
+
+    "github.com/gofiber/fiber/v2"
+    "github.com/vortechron/go-ws"
+    "github.com/vortechron/go-ws/adaptor"
+  )
+
+  func main() {
+    // Create WebSocket hub
+    ctx := context.Background()
+    redisAddr := "localhost:6379"
+    config := ws.Config{
+      PingInterval:    30 * time.Second,
+      WriteBufferSize: 1024,
+      ReadBufferSize:  1024,
+    }
+    
+    hub, _ := ws.NewWebSocketServer(ctx, redisAddr, config)
+    go hub.Run()
+
+    // Create WebSocket options
+    options := &ws.Options{
+      // Authorization handler
+      AuthHandler: func(userID string, channelName string) bool {
+        // Implement your authorization logic
+        return true
+      },
+
+      // Get user ID from request
+      GetUserID: func(r *http.Request) string {
+        // Get user ID from request
+        return "user-123"
+      },
+    }
+
+    // Create Fiber app
+    app := fiber.New()
+    
+    // Create WebSocket route
+    app.Use("/ws", adaptor.FiberHandler(hub, options))
+    
+    // Start server
+    app.Listen(":8080")
+  }
+  ```
+
+3. Connect from the client side as shown in the earlier examples.
+
 
 
 

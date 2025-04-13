@@ -27,7 +27,7 @@ type Middleware interface {
 }
 
 // ServeWS handles WebSocket requests from clients.
-func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, options *Options) error {
+func ServeWS(hub *DefaultHub, w http.ResponseWriter, r *http.Request, options *Options) error {
 	// Set options on hub
 	hub.SetOptions(options)
 
@@ -44,7 +44,7 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, options *Options)
 	return nil
 }
 
-func handleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request, options *Options) {
+func handleWebSocket(hub *DefaultHub, w http.ResponseWriter, r *http.Request, options *Options) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		if options.ErrorHandler != nil {
@@ -80,7 +80,7 @@ func handleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request, options *
 }
 
 // Update the initialization
-func NewWebSocketServer(ctx context.Context, redisAddr string, config Config) (*Hub, error) {
+func NewWebSocketServer(ctx context.Context, redisAddr string, config Config) (*DefaultHub, error) {
 	broker := NewRedisBroker(redisAddr)
 	storage := NewRedisStorage(redisAddr)
 	return NewHub(ctx, broker, storage, config), nil
