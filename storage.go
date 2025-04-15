@@ -46,11 +46,8 @@ const (
 	channelExpiry = 24 * time.Hour
 )
 
-func NewRedisStorage(redisAddr string) *RedisStorage {
-	client := redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
-	return &RedisStorage{client: client}
+func NewRedisStorage(redisAddr string, options ...func(*redis.Options)) *RedisStorage {
+	return &RedisStorage{client: redis.NewClient(newRedisConfig(options...))}
 }
 
 func (rs *RedisStorage) SaveClient(ctx context.Context, client *ClientInfo) error {
