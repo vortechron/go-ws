@@ -47,7 +47,10 @@ const (
 )
 
 func NewRedisStorage(redisAddr string, options ...func(*redis.Options)) *RedisStorage {
-	return &RedisStorage{client: redis.NewClient(newRedisConfig(options...))}
+	opt := newRedisConfig(options...)
+	opt.Addr = redisAddr
+
+	return &RedisStorage{client: redis.NewClient(opt)}
 }
 
 func (rs *RedisStorage) SaveClient(ctx context.Context, client *ClientInfo) error {

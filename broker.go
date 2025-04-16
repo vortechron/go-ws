@@ -20,7 +20,10 @@ type RedisBroker struct {
 
 // NewRedisBroker returns a new instance of RedisBroker.
 func NewRedisBroker(redisAddr string, options ...func(*redis.Options)) *RedisBroker {
-	return &RedisBroker{client: redis.NewClient(newRedisConfig(options...))}
+	opt := newRedisConfig(options...)
+	opt.Addr = redisAddr
+
+	return &RedisBroker{client: redis.NewClient(opt)}
 }
 
 // Publish publishes the payload to the specified channel.
