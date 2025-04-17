@@ -27,7 +27,7 @@ type Middleware interface {
 }
 
 // ServeWS handles WebSocket requests from clients.
-func ServeWS(hub *DefaultHub, w http.ResponseWriter, r *http.Request, options *Options) error {
+func ServeWS(hub Hub, w http.ResponseWriter, r *http.Request, options *Options) error {
 	// Set options on hub
 	hub.SetOptions(options)
 
@@ -44,7 +44,7 @@ func ServeWS(hub *DefaultHub, w http.ResponseWriter, r *http.Request, options *O
 	return nil
 }
 
-func handleWebSocket(hub *DefaultHub, w http.ResponseWriter, r *http.Request, options *Options) {
+func handleWebSocket(hub Hub, w http.ResponseWriter, r *http.Request, options *Options) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		if options.ErrorHandler != nil {
@@ -58,7 +58,7 @@ func handleWebSocket(hub *DefaultHub, w http.ResponseWriter, r *http.Request, op
 	client := &Client{
 		hub:         hub,
 		conn:        conn,
-		send:        make(chan []byte, hub.clientQueueSize),
+		send:        make(chan []byte, hub.GetClientQueueSize()),
 		UserID:      userID,
 		Metadata:    make(map[string]interface{}),
 		CreatedAt:   time.Now(),
@@ -70,10 +70,7 @@ func handleWebSocket(hub *DefaultHub, w http.ResponseWriter, r *http.Request, op
 		options.OnConnect(client)
 	}
 
-	hub.stats.mu.Lock()
-	hub.stats.totalConnections++
-	hub.stats.activeConnections++
-	hub.stats.mu.Unlock()
+	hub.IncrementConnections()
 
 	go client.writePump()
 	go client.readPump()

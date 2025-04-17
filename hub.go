@@ -18,6 +18,7 @@ type Hub interface {
 	GetBrokerContexts() map[string]context.CancelFunc
 	GetProcessedMessages() sync.Map
 	GetOptions() *Options
+	SetOptions(options *Options)
 	GetStats() HubStats
 	IncrementConnections()
 	DecrementConnections()

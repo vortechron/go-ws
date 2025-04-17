@@ -11,7 +11,7 @@ import (
 
 // FiberAdaptor creates a Fiber handler that serves WebSocket connections
 // by adapting the request to the standard net/http handler `ws.ServeWS`.
-func FiberAdaptor(hub *ws.DefaultHub, options *ws.Options) fiber.Handler {
+func FiberAdaptor(hub ws.Hub, options *ws.Options) fiber.Handler {
 	// Create an http.HandlerFunc that calls the original ServeWS
 	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		err := ws.ServeWS(hub, w, r, options)
