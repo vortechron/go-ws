@@ -99,7 +99,7 @@ func (c *Client) readPump() {
 
 		switch action {
 		case "subscribe":
-			if isPrivateChannel(channel) && !c.authHandler(c.UserID, channel) {
+			if shouldAuthenticate(channel) && !c.authHandler(c.UserID, channel) {
 				fmt.Println("not authorized")
 				continue
 			}

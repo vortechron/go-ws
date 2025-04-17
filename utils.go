@@ -35,3 +35,7 @@ func isPrivateChannel(channelName string) bool {
 func isPresenceChannel(channelName string) bool {
 	return strings.HasPrefix(channelName, "presence-")
 }
+
+func shouldAuthenticate(channelName string) bool {
+	return isPrivateChannel(channelName) || isPresenceChannel(channelName)
+}
