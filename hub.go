@@ -34,7 +34,7 @@ type Hub interface {
 // Hub manages all channels and routing events.
 type DefaultHub struct {
 	mu                 sync.RWMutex
-	channels           map[string]map[*Client]bool
+	channels           map[string]map[string]*Client
 	subscribe          chan Subscription
 	unsubscribe        chan Subscription
 	Broadcast          chan Broadcast
@@ -156,7 +156,7 @@ type Broadcast struct {
 // NewHub initializes a new Hub instance.
 func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, config Config) *DefaultHub {
 	hub := &DefaultHub{
-		channels:           make(map[string]map[*Client]bool),
+		channels:           make(map[string]map[string]*Client),
 		subscribe:          make(chan Subscription, 1000),
 		unsubscribe:        make(chan Subscription, 1000),
 		Broadcast:          make(chan Broadcast, config.WriteBufferSize),
@@ -218,9 +218,9 @@ func (h *DefaultHub) sendWhisperToChannel(whisper *WhisperEvent) {
 		return
 	}
 
-	for client := range clients {
+	for _, client := range clients {
 		// Skip the sender (optional, based on your requirements)
-		if client.UserID == whisper.FromID {
+		if client.UserID == whisper.FromID || client.ClientID == whisper.FromID {
 			continue
 		}
 
@@ -231,7 +231,7 @@ func (h *DefaultHub) sendWhisperToChannel(whisper *WhisperEvent) {
 
 		// Only send if client is still subscribed according to Redis
 		for _, id := range clientIDs {
-			if id == client.UserID {
+			if id == client.ClientID {
 				// Send the message in a non-blocking way
 				select {
 				case client.send <- message:
@@ -272,6 +272,7 @@ func (h *DefaultHub) handleSubscribe(sub Subscription) {
 	// Store client info in Redis
 	clientInfo := &ClientInfo{
 		UserID:    sub.Client.UserID,
+		ClientID:  sub.Client.ClientID,
 		Metadata:  sub.Client.Metadata,
 		CreatedAt: sub.Client.CreatedAt,
 		LastSeen:  time.Now(),
@@ -282,7 +283,7 @@ func (h *DefaultHub) handleSubscribe(sub Subscription) {
 		return
 	}
 
-	if err := h.storage.AddClientToChannel(context.Background(), sub.ChannelName, sub.Client.UserID); err != nil {
+	if err := h.storage.AddClientToChannel(context.Background(), sub.ChannelName, sub.Client.ClientID); err != nil {
 		log.Printf("[Hub] Error adding client to channel: %v", err)
 		return
 	}
@@ -290,7 +291,7 @@ func (h *DefaultHub) handleSubscribe(sub Subscription) {
 	// Add to local map for active connections
 	h.mu.Lock()
 	if _, exists := h.channels[sub.ChannelName]; !exists {
-		h.channels[sub.ChannelName] = make(map[*Client]bool)
+		h.channels[sub.ChannelName] = make(map[string]*Client)
 
 		// Set up broker subscription if needed
 		ctx, cancel := context.WithCancel(context.Background())
@@ -303,7 +304,7 @@ func (h *DefaultHub) handleSubscribe(sub Subscription) {
 			go h.handleBrokerMessages(sub.ChannelName, msgCh)
 		}
 	}
-	h.channels[sub.ChannelName][sub.Client] = true
+	h.channels[sub.ChannelName][sub.Client.ClientID] = sub.Client
 	h.mu.Unlock()
 
 	if isPresenceChannel(sub.ChannelName) {
@@ -331,16 +332,6 @@ func (h *DefaultHub) handleBrokerMessages(channelName string, msgCh <-chan []byt
 			h.processedMessages.Delete(messageID)
 		}(broadcast.MessageID)
 
-		// Skip rebroadcasting presence messages that originated from this instance
-		// if broadcast.SenderID == "system" {
-		// 	var presenceMsg PresenceMessage
-		// 	if err := json.Unmarshal(broadcast.Data, &presenceMsg); err == nil {
-		// 		if presenceMsg.Event == "presence:join" || presenceMsg.Event == "presence:leave" {
-		// 			continue
-		// 		}
-		// 	}
-		// }
-
 		// Get all active clients for this channel from Redis
 		ctx := context.Background()
 		clientIDs, err := h.storage.GetChannelClients(ctx, channelName)
@@ -352,7 +343,7 @@ func (h *DefaultHub) handleBrokerMessages(channelName string, msgCh <-chan []byt
 		// Send to local active connections
 		h.mu.RLock()
 		clients := h.channels[channelName]
-		for client := range clients {
+		for _, client := range clients {
 			// Skip if client is closing
 			if client.isClosing {
 				continue
@@ -360,7 +351,7 @@ func (h *DefaultHub) handleBrokerMessages(channelName string, msgCh <-chan []byt
 
 			// Only send if client is still subscribed according to Redis
 			for _, id := range clientIDs {
-				if id == client.UserID {
+				if id == client.ClientID {
 					// Use a separate goroutine to send with timeout
 					go func(c *Client) {
 						broadcastBytes, err := json.Marshal(map[string]interface{}{
@@ -397,7 +388,7 @@ func (h *DefaultHub) handleUnsubscribe(sub Subscription) {
 	defer h.mu.Unlock()
 
 	// Remove client from Redis channel first
-	if err := h.storage.RemoveClientFromChannel(context.Background(), sub.ChannelName, sub.Client.UserID); err != nil {
+	if err := h.storage.RemoveClientFromChannel(context.Background(), sub.ChannelName, sub.Client.ClientID); err != nil {
 		log.Printf("[Hub] Error removing client from Redis channel: %v", err)
 	}
 
@@ -441,11 +432,11 @@ func (h *DefaultHub) handleSlowClient(c *Client, channelName string) {
 		return
 	}
 
-	log.Printf("[Hub] Removing slow client %s from channel %s", c.UserID, channelName)
+	log.Printf("[Hub] Removing slow client %s from channel %s", c.ClientID, channelName)
 	h.unsubscribeClientFromChannel(c, channelName)
 
 	// Remove from Redis
-	if err := h.storage.RemoveClientFromChannel(context.Background(), channelName, c.UserID); err != nil {
+	if err := h.storage.RemoveClientFromChannel(context.Background(), channelName, c.ClientID); err != nil {
 		log.Printf("[Hub] Error removing client from Redis channel: %v", err)
 	}
 
@@ -461,12 +452,16 @@ func (h *DefaultHub) cleanupStaleConnections() {
 	defer h.mu.Unlock()
 
 	now := time.Now()
-	staleTimeout := now.Add(-5 * time.Minute)
+	// staleTimeout := now.Add(-5 * time.Minute)
+	staleTimeout := now.Add(-10 * time.Second)
 
+	log.Println("cleanupStaleConnections: channels", h.channels)
 	for channelName, clients := range h.channels {
-		for client := range clients {
+		for _, client := range clients {
+			log.Println("client.LastSeen", client.LastSeen)
+			log.Println("staleTimeout", staleTimeout)
 			if client.LastSeen.Before(staleTimeout) {
-				log.Printf("[Cleanup] Removing stale client %s", client.UserID)
+				log.Printf("[Cleanup] Removing stale client %s", client.ClientID)
 				h.unsubscribeClientFromChannel(client, channelName)
 				client.Close()
 				h.stats.mu.Lock()
@@ -497,11 +492,11 @@ func (h *DefaultHub) logStats() {
 // unsubscribeClientFromChannel removes a client from a specific channel.
 func (h *DefaultHub) unsubscribeClientFromChannel(client *Client, channelName string) {
 	if clients, exists := h.channels[channelName]; exists {
-		if _, ok := clients[client]; ok {
-			delete(clients, client)
+		if _, ok := clients[client.ClientID]; ok {
+			delete(clients, client.ClientID)
 
 			// Remove client from Redis channel storage
-			if err := h.storage.RemoveClientFromChannel(context.Background(), channelName, client.UserID); err != nil {
+			if err := h.storage.RemoveClientFromChannel(context.Background(), channelName, client.ClientID); err != nil {
 				log.Printf("[Hub] Error removing client from Redis channel: %v", err)
 			}
 
@@ -538,6 +533,7 @@ func (h *DefaultHub) broadcastPresenceJoin(sub Subscription) {
 	joinMsg := PresenceMessage{
 		Event:     "presence:join",
 		UserID:    sub.Client.UserID,
+		ClientID:  sub.Client.ClientID,
 		Timestamp: time.Now(),
 		Metadata:  sub.Client.Metadata,
 	}
@@ -558,6 +554,7 @@ func (h *DefaultHub) broadcastPresenceLeave(client *Client, channelName string) 
 	leaveMsg := PresenceMessage{
 		Event:     "presence:leave",
 		UserID:    client.UserID,
+		ClientID:  client.ClientID,
 		Timestamp: time.Now(),
 		Metadata:  client.Metadata,
 	}
@@ -568,7 +565,7 @@ func (h *DefaultHub) broadcastPresenceLeave(client *Client, channelName string) 
 			Data:        payload,
 			SenderID:    "system",
 			Timestamp:   time.Now(),
-			MessageID:   fmt.Sprintf("presence-leave-%s-%d", client.UserID, time.Now().UnixNano()),
+			MessageID:   fmt.Sprintf("presence-leave-%s-%d", client.ClientID, time.Now().UnixNano()),
 		}
 	}
 }
@@ -579,7 +576,7 @@ func (h *DefaultHub) removeClientFromAllChannels(c *Client) {
 	defer h.mu.Unlock()
 
 	for channelName, clients := range h.channels {
-		if _, ok := clients[c]; ok {
+		if _, ok := clients[c.ClientID]; ok {
 			h.unsubscribeClientFromChannel(c, channelName)
 		}
 	}

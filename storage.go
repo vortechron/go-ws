@@ -13,13 +13,13 @@ import (
 type StorageClient interface {
 	// Client operations
 	SaveClient(ctx context.Context, client *ClientInfo) error
-	GetClient(ctx context.Context, userID string) (*ClientInfo, error)
-	RemoveClient(ctx context.Context, userID string) error
-	UpdateClientLastSeen(ctx context.Context, userID string) error
+	GetClient(ctx context.Context, clientID string) (*ClientInfo, error)
+	RemoveClient(ctx context.Context, clientID string) error
+	UpdateClientLastSeen(ctx context.Context, clientID string) error
 
 	// Channel operations
-	AddClientToChannel(ctx context.Context, channelName, userID string) error
-	RemoveClientFromChannel(ctx context.Context, channelName, userID string) error
+	AddClientToChannel(ctx context.Context, channelName, clientID string) error
+	RemoveClientFromChannel(ctx context.Context, channelName, clientID string) error
 	GetChannelClients(ctx context.Context, channelName string) ([]string, error)
 
 	// Cleanup
@@ -28,6 +28,7 @@ type StorageClient interface {
 
 // ClientInfo represents client data stored in Redis
 type ClientInfo struct {
+	ClientID  string                 `json:"client_id"`
 	UserID    string                 `json:"user_id"`
 	Metadata  map[string]interface{} `json:"metadata"`
 	CreatedAt time.Time              `json:"created_at"`
@@ -59,12 +60,12 @@ func (rs *RedisStorage) SaveClient(ctx context.Context, client *ClientInfo) erro
 		return fmt.Errorf("failed to marshal client: %w", err)
 	}
 
-	key := clientPrefix + client.UserID
+	key := clientPrefix + client.ClientID
 	return rs.client.Set(ctx, key, data, clientExpiry).Err()
 }
 
-func (rs *RedisStorage) GetClient(ctx context.Context, userID string) (*ClientInfo, error) {
-	key := clientPrefix + userID
+func (rs *RedisStorage) GetClient(ctx context.Context, clientID string) (*ClientInfo, error) {
+	key := clientPrefix + clientID
 	data, err := rs.client.Get(ctx, key).Bytes()
 	if err != nil {
 		if err == redis.Nil {
@@ -80,32 +81,32 @@ func (rs *RedisStorage) GetClient(ctx context.Context, userID string) (*ClientIn
 	return &client, nil
 }
 
-func (rs *RedisStorage) RemoveClient(ctx context.Context, userID string) error {
-	key := clientPrefix + userID
+func (rs *RedisStorage) RemoveClient(ctx context.Context, clientID string) error {
+	key := clientPrefix + clientID
 	return rs.client.Del(ctx, key).Err()
 }
 
-func (rs *RedisStorage) UpdateClientLastSeen(ctx context.Context, userID string) error {
-	client, err := rs.GetClient(ctx, userID)
+func (rs *RedisStorage) UpdateClientLastSeen(ctx context.Context, clientID string) error {
+	client, err := rs.GetClient(ctx, clientID)
 	if err != nil {
 		return err
 	}
 	if client == nil {
-		return fmt.Errorf("client not found: %s", userID)
+		return fmt.Errorf("client not found: %s", clientID)
 	}
 
 	client.LastSeen = time.Now()
 	return rs.SaveClient(ctx, client)
 }
 
-func (rs *RedisStorage) AddClientToChannel(ctx context.Context, channelName, userID string) error {
+func (rs *RedisStorage) AddClientToChannel(ctx context.Context, channelName, clientID string) error {
 	key := channelPrefix + channelName
-	return rs.client.SAdd(ctx, key, userID).Err()
+	return rs.client.SAdd(ctx, key, clientID).Err()
 }
 
-func (rs *RedisStorage) RemoveClientFromChannel(ctx context.Context, channelName, userID string) error {
+func (rs *RedisStorage) RemoveClientFromChannel(ctx context.Context, channelName, clientID string) error {
 	key := channelPrefix + channelName
-	return rs.client.SRem(ctx, key, userID).Err()
+	return rs.client.SRem(ctx, key, clientID).Err()
 }
 
 func (rs *RedisStorage) GetChannelClients(ctx context.Context, channelName string) ([]string, error) {
@@ -131,8 +132,8 @@ func (rs *RedisStorage) CleanupStaleClients(ctx context.Context, timeout time.Du
 		}
 
 		if time.Since(client.LastSeen) > timeout {
-			userID := key[len(clientPrefix):]
-			rs.RemoveClient(ctx, userID)
+			clientID := key[len(clientPrefix):]
+			rs.RemoveClient(ctx, clientID)
 		}
 	}
 	return iter.Err()

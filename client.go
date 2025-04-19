@@ -8,14 +8,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
 func NewClient(hub Hub, conn *websocket.Conn, send chan []byte, userID string, metadata map[string]interface{}, createdAt time.Time, lastSeen time.Time, authHandler AuthorizationHandler) *Client {
+	// Generate UUID if userID is empty
+	if userID == "" {
+		userID = uuid.NewString()
+	}
+
+	// Always generate a new ClientID for each connection
+	clientID := uuid.NewString()
+
 	return &Client{
 		hub:         hub,
 		conn:        conn,
 		send:        send,
+		ClientID:    clientID,
 		UserID:      userID,
 		Metadata:    metadata,
 		CreatedAt:   createdAt,
@@ -29,7 +39,8 @@ type Client struct {
 	hub         Hub
 	conn        *websocket.Conn
 	send        chan []byte
-	UserID      string
+	ClientID    string // Unique identifier for each connection
+	UserID      string // User identifier (can be shared across connections)
 	Metadata    map[string]interface{}
 	CreatedAt   time.Time
 	LastSeen    time.Time
@@ -41,7 +52,8 @@ type Client struct {
 // PresenceMessage is how we'll communicate presence joins/leaves.
 type PresenceMessage struct {
 	Event     string                 `json:"event"`
-	UserID    string                 `json:"user_id"`
+	ClientID  string                 `json:"client_id"` // Unique identifier for the connection
+	UserID    string                 `json:"user_id"`   // User identifier (can be shared)
 	Timestamp time.Time              `json:"timestamp"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
@@ -70,6 +82,7 @@ func (c *Client) readPump() {
 	c.conn.SetReadLimit(maxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
+		log.Println("pong")
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		c.updateLastSeen()
 		return nil
@@ -121,7 +134,7 @@ func (c *Client) readPump() {
 				hubBroadcastChannel <- Broadcast{
 					ChannelName: channel,
 					Data:        data,
-					SenderID:    c.UserID,
+					SenderID:    c.ClientID,
 					Timestamp:   time.Now(),
 				}
 			}
@@ -144,9 +157,9 @@ func (c *Client) readPump() {
 
 			// Create whisper event
 			whisperEvt := &WhisperEvent{
-				Action:      "whisper", // duh
+				Action:      "whisper",
 				ChannelName: channel,
-				FromID:      c.UserID,
+				FromID:      c.ClientID,
 				Event:       event,
 				Timestamp:   time.Now(),
 			}
@@ -225,7 +238,7 @@ func (c *Client) Close() {
 
 		// Remove from Redis
 		ctx := context.Background()
-		if err := c.hub.GetStorageClient().RemoveClient(ctx, c.UserID); err != nil {
+		if err := c.hub.GetStorageClient().RemoveClient(ctx, c.ClientID); err != nil {
 			log.Printf("[Client] Error removing client from Redis: %v", err)
 		}
 
@@ -236,12 +249,14 @@ func (c *Client) Close() {
 
 // updateLastSeen updates the last seen timestamp for the client.
 func (c *Client) updateLastSeen() {
+	log.Println("updateLastSeen", c.ClientID)
+
 	c.mu.Lock()
 	c.LastSeen = time.Now()
 	c.mu.Unlock()
 
 	ctx := context.Background()
-	if err := c.hub.GetStorageClient().UpdateClientLastSeen(ctx, c.UserID); err != nil {
+	if err := c.hub.GetStorageClient().UpdateClientLastSeen(ctx, c.ClientID); err != nil {
 		log.Printf("[Client] Error updating last seen: %v", err)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // AuthorizationHandler is a function type for checking channel authorization.
@@ -53,13 +55,13 @@ func handleWebSocket(hub Hub, w http.ResponseWriter, r *http.Request, options *O
 		return
 	}
 
-	userID := options.GetUserID(r)
-
+	// Create a new client with the userID and a unique clientID
 	client := &Client{
 		hub:         hub,
 		conn:        conn,
 		send:        make(chan []byte, hub.GetClientQueueSize()),
-		UserID:      userID,
+		ClientID:    uuid.New().String(),
+		UserID:      options.GetUserID(r),
 		Metadata:    make(map[string]interface{}),
 		CreatedAt:   time.Now(),
 		LastSeen:    time.Now(),
