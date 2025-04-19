@@ -473,8 +473,8 @@ func (h *DefaultHub) cleanupStaleConnections() {
 	h.logger.Debug("Cleaning up stale connections", "channels", h.channels)
 
 	now := time.Now()
-	// staleTimeout := now.Add(-5 * time.Minute)
-	staleTimeout := now.Add(-10 * time.Second)
+	staleTimeout := now.Add(-5 * time.Minute)
+	// staleTimeout := now.Add(-10 * time.Second)
 
 	for channelName, clients := range h.channels {
 		for _, client := range clients {

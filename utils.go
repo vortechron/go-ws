@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	writeWait = 10 * time.Second
-	pongWait  = 60 * time.Second
-	// pingPeriod     = (pongWait * 9) / 10
-	pingPeriod     = 5 * time.Second
+	writeWait  = 10 * time.Second
+	pongWait   = 60 * time.Second
+	pingPeriod = (pongWait * 9) / 10 // 54 seconds, y? because of the 10% buffer?
+	// pingPeriod     = 5 * time.Second
 	maxMessageSize = 512 * 1024 // 512KB
 )
 
