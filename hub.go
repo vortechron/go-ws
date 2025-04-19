@@ -460,12 +460,12 @@ func (h *DefaultHub) cleanupStaleConnections() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	staleTimeout := 5 * time.Minute
 	now := time.Now()
+	staleTimeout := now.Add(-5 * time.Minute)
 
 	for channelName, clients := range h.channels {
 		for client := range clients {
-			if now.Sub(client.LastSeen) > staleTimeout {
+			if client.LastSeen.Before(staleTimeout) {
 				log.Printf("[Cleanup] Removing stale client %s", client.UserID)
 				h.unsubscribeClientFromChannel(client, channelName)
 				client.Close()
