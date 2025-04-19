@@ -3,8 +3,6 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -21,6 +19,9 @@ func NewClient(hub Hub, conn *websocket.Conn, send chan []byte, userID string, m
 	// Always generate a new ClientID for each connection
 	clientID := uuid.NewString()
 
+	// Create a logger with client context
+	logger := DefaultLogger()
+
 	return &Client{
 		hub:         hub,
 		conn:        conn,
@@ -31,6 +32,7 @@ func NewClient(hub Hub, conn *websocket.Conn, send chan []byte, userID string, m
 		CreatedAt:   createdAt,
 		LastSeen:    lastSeen,
 		authHandler: authHandler,
+		logger:      logger,
 	}
 }
 
@@ -47,6 +49,12 @@ type Client struct {
 	isClosing   bool
 	mu          sync.RWMutex
 	authHandler AuthorizationHandler
+	logger      Logger
+}
+
+// SetLogger sets the logger for the client
+func (c *Client) SetLogger(logger Logger) {
+	c.logger = logger
 }
 
 // PresenceMessage is how we'll communicate presence joins/leaves.
@@ -82,7 +90,7 @@ func (c *Client) readPump() {
 	c.conn.SetReadLimit(maxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
-		log.Println("pong")
+		c.logger.Debug("Received pong message")
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		c.updateLastSeen()
 		return nil
@@ -98,7 +106,7 @@ func (c *Client) readPump() {
 		var msg map[string]interface{}
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[ReadPump] error: %v", err)
+				c.logger.Error("WebSocket read error: %v", err)
 			}
 			break
 		}
@@ -110,10 +118,12 @@ func (c *Client) readPump() {
 		channel, _ := msg["channel"].(string)
 		dataRaw := msg["data"]
 
+		c.logger.Debug("Received message: action=%s, channel=%s", action, channel)
+
 		switch action {
 		case "subscribe":
 			if shouldAuthenticate(channel) && !c.authHandler(c.UserID, channel) {
-				fmt.Println("not authorized")
+				c.logger.Warn("Unauthorized subscription attempt to channel %s", channel)
 				continue
 			}
 			hubSubscribeChannel <- Subscription{
@@ -137,6 +147,8 @@ func (c *Client) readPump() {
 					SenderID:    c.ClientID,
 					Timestamp:   time.Now(),
 				}
+			} else {
+				c.logger.Error("Failed to marshal broadcast data: %v", err)
 			}
 
 		case "whisper":
@@ -147,11 +159,13 @@ func (c *Client) readPump() {
 				if hubOptions != nil && hubOptions.ErrorHandler != nil {
 					hubOptions.ErrorHandler(&WhisperError{Message: "Invalid whisper: missing channel or event"})
 				}
+				c.logger.Warn("Invalid whisper: missing channel or event")
 				continue
 			}
 
 			// Check if whispers are enabled
 			if hubOptions == nil || !hubOptions.EnableWhispers {
+				c.logger.Debug("Whisper ignored: whispers not enabled")
 				continue
 			}
 
@@ -176,6 +190,7 @@ func (c *Client) readPump() {
 			// Apply whisper middleware if configured
 			if c.hub.GetOptions().WhisperMiddleware != nil {
 				if !c.hub.GetOptions().WhisperMiddleware(whisperEvt) {
+					c.logger.Debug("Whisper blocked by middleware")
 					continue
 				}
 			}
@@ -235,11 +250,12 @@ func (c *Client) Close() {
 
 	if !c.isClosing {
 		c.isClosing = true
+		c.logger.Info("Closing connection")
 
 		// Remove from Redis
 		ctx := context.Background()
 		if err := c.hub.GetStorageClient().RemoveClient(ctx, c.ClientID); err != nil {
-			log.Printf("[Client] Error removing client from Redis: %v", err)
+			c.logger.Error("Error removing client from Redis: %v", err)
 		}
 
 		close(c.send)
@@ -249,14 +265,15 @@ func (c *Client) Close() {
 
 // updateLastSeen updates the last seen timestamp for the client.
 func (c *Client) updateLastSeen() {
-	log.Println("updateLastSeen", c.ClientID)
-
 	c.mu.Lock()
-	c.LastSeen = time.Now()
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
+	c.logger.Debug("Updating last seen timestamp")
+	c.LastSeen = time.Now()
+
+	// Update in Redis
 	ctx := context.Background()
 	if err := c.hub.GetStorageClient().UpdateClientLastSeen(ctx, c.ClientID); err != nil {
-		log.Printf("[Client] Error updating last seen: %v", err)
+		c.logger.Error("Error updating last seen: %v", err)
 	}
 }

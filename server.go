@@ -22,6 +22,9 @@ type Options struct {
 	OnDisconnect      func(*Client)
 	EnableWhispers    bool
 	WhisperMiddleware WhisperMiddlewareHandler
+	Client            struct {
+		Logger Logger
+	}
 }
 
 type Middleware interface {
@@ -66,6 +69,10 @@ func handleWebSocket(hub Hub, w http.ResponseWriter, r *http.Request, options *O
 		CreatedAt:   time.Now(),
 		LastSeen:    time.Now(),
 		authHandler: options.AuthHandler,
+	}
+
+	if options.Client.Logger != nil {
+		client.SetLogger(options.Client.Logger)
 	}
 
 	if options.OnConnect != nil {

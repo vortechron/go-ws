@@ -16,10 +16,10 @@ type Hub interface {
 	GetMessageBroker() MessageBroker
 	GetStorageClient() StorageClient
 	GetBrokerContexts() map[string]context.CancelFunc
-	GetProcessedMessages() sync.Map
+	GetProcessedMessages() *sync.Map
 	GetOptions() *Options
 	SetOptions(options *Options)
-	GetStats() HubStats
+	GetStats() *HubStats
 	IncrementConnections()
 	DecrementConnections()
 	GetClientQueueSize() int
@@ -46,8 +46,8 @@ type DefaultHub struct {
 	brokerContexts     map[string]context.CancelFunc // Track broker subscriptions
 	processedMessages  sync.Map
 	options            *Options
-
-	shouldLogStats bool
+	logger             Logger
+	shouldLogStats     bool
 }
 
 // Implement Hub interface methods for DefaultHub
@@ -75,16 +75,16 @@ func (h *DefaultHub) GetBrokerContexts() map[string]context.CancelFunc {
 	return h.brokerContexts
 }
 
-func (h *DefaultHub) GetProcessedMessages() sync.Map {
-	return h.processedMessages
+func (h *DefaultHub) GetProcessedMessages() *sync.Map {
+	return &h.processedMessages
 }
 
 func (h *DefaultHub) GetOptions() *Options {
 	return h.options
 }
 
-func (h *DefaultHub) GetStats() HubStats {
-	return h.stats
+func (h *DefaultHub) GetStats() *HubStats {
+	return &h.stats
 }
 
 func (h *DefaultHub) GetClientQueueSize() int {
@@ -155,6 +155,8 @@ type Broadcast struct {
 
 // NewHub initializes a new Hub instance.
 func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, config Config) *DefaultHub {
+	logger := NewLogger(config.LogLevel, nil)
+
 	hub := &DefaultHub{
 		channels:           make(map[string]map[string]*Client),
 		subscribe:          make(chan Subscription, 1000),
@@ -167,8 +169,12 @@ func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, co
 		storage:            storage,
 		brokerContexts:     make(map[string]context.CancelFunc),
 		processedMessages:  sync.Map{},
+		logger:             logger,
 		shouldLogStats:     config.ShouldLogStats,
 	}
+
+	// Set the default logger with the configured level
+	SetLogLevel(config.LogLevel)
 
 	return hub
 }
@@ -176,6 +182,11 @@ func NewHub(ctx context.Context, broker MessageBroker, storage StorageClient, co
 // SetOptions sets the options for the hub
 func (h *DefaultHub) SetOptions(options *Options) {
 	h.options = options
+}
+
+// SetLogger sets the logger for the hub
+func (h *DefaultHub) SetLogger(logger Logger) {
+	h.logger = logger
 }
 
 // sendWhisperToChannel sends a whisper event to all clients on a channel
@@ -206,17 +217,17 @@ func (h *DefaultHub) sendWhisperToChannel(whisper *WhisperEvent) {
 		return
 	}
 
-	// Send to all clients in the channel
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
 	// Get all active clients for this channel from Redis
 	ctx := context.Background()
 	clientIDs, err := h.storage.GetChannelClients(ctx, channelName)
 	if err != nil {
-		log.Printf("[Hub] Error getting channel clients: %v", err)
+		log.Println("Error getting channel clients", "error", err, "channel", channelName)
 		return
 	}
+
+	// Send to all clients in the channel
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 
 	for _, client := range clients {
 		// Skip the sender (optional, based on your requirements)
@@ -248,7 +259,7 @@ func (h *DefaultHub) sendWhisperToChannel(whisper *WhisperEvent) {
 
 // Run starts the Hub's event loop.
 func (h *DefaultHub) Run() {
-	log.Println("[Run] Starting Hub event loop")
+	h.logger.Info("Starting Hub event loop")
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -267,7 +278,7 @@ func (h *DefaultHub) Run() {
 	}
 }
 
-// handleSubscribe processes subscription requests.
+// handleSubscribe handles a client subscription
 func (h *DefaultHub) handleSubscribe(sub Subscription) {
 	// Store client info in Redis
 	clientInfo := &ClientInfo{
@@ -279,12 +290,12 @@ func (h *DefaultHub) handleSubscribe(sub Subscription) {
 	}
 
 	if err := h.storage.SaveClient(context.Background(), clientInfo); err != nil {
-		log.Printf("[Hub] Error saving client: %v", err)
+		log.Println("Error saving client", "error", err, "clientID", sub.Client.ClientID)
 		return
 	}
 
 	if err := h.storage.AddClientToChannel(context.Background(), sub.ChannelName, sub.Client.ClientID); err != nil {
-		log.Printf("[Hub] Error adding client to channel: %v", err)
+		log.Println("Error adding client to channel", "error", err, "clientID", sub.Client.ClientID, "channel", sub.ChannelName)
 		return
 	}
 
@@ -299,10 +310,12 @@ func (h *DefaultHub) handleSubscribe(sub Subscription) {
 
 		msgCh, err := h.messageBroker.Subscribe(ctx, sub.ChannelName)
 		if err != nil {
-			log.Printf("[Hub] Error subscribing to broker channel %s: %v", sub.ChannelName, err)
-		} else {
-			go h.handleBrokerMessages(sub.ChannelName, msgCh)
+			log.Println("Error subscribing to broker channel", "error", err, "channel", sub.ChannelName)
+			cancel()
+			delete(h.brokerContexts, sub.ChannelName)
+			return
 		}
+		go h.handleBrokerMessages(sub.ChannelName, msgCh)
 	}
 	h.channels[sub.ChannelName][sub.Client.ClientID] = sub.Client
 	h.mu.Unlock()
@@ -314,71 +327,79 @@ func (h *DefaultHub) handleSubscribe(sub Subscription) {
 
 // handleBrokerMessages processes messages from the broker for a specific channel
 func (h *DefaultHub) handleBrokerMessages(channelName string, msgCh <-chan []byte) {
-	for msg := range msgCh {
-		var broadcast Broadcast
-		if err := json.Unmarshal(msg, &broadcast); err != nil {
-			log.Printf("[Hub] Error unmarshalling broker message: %v", err)
-			continue
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		// Check if we've already processed this message
-		if _, exists := h.processedMessages.LoadOrStore(broadcast.MessageID, true); exists {
-			continue
-		}
-
-		// Clean up old message IDs after a delay
-		go func(messageID string) {
-			time.Sleep(5 * time.Second)
-			h.processedMessages.Delete(messageID)
-		}(broadcast.MessageID)
-
-		// Get all active clients for this channel from Redis
-		ctx := context.Background()
-		clientIDs, err := h.storage.GetChannelClients(ctx, channelName)
-		if err != nil {
-			log.Printf("[Hub] Error getting channel clients: %v", err)
-			continue
-		}
-
-		// Send to local active connections
-		h.mu.RLock()
-		clients := h.channels[channelName]
-		for _, client := range clients {
-			// Skip if client is closing
-			if client.isClosing {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-msgCh:
+			var broadcast Broadcast
+			if err := json.Unmarshal(msg, &broadcast); err != nil {
+				h.logger.Error("Error unmarshalling broker message: %v", err)
 				continue
 			}
 
-			// Only send if client is still subscribed according to Redis
-			for _, id := range clientIDs {
-				if id == client.ClientID {
-					// Use a separate goroutine to send with timeout
-					go func(c *Client) {
-						broadcastBytes, err := json.Marshal(map[string]interface{}{
-							"channel_name": broadcast.ChannelName,
-							"data":         json.RawMessage(broadcast.Data),
-							"sender_id":    broadcast.SenderID,
-							"timestamp":    broadcast.Timestamp.Format(time.RFC3339),
-							"message_id":   broadcast.MessageID,
-							"event":        broadcast.Event,
-						})
-						if err != nil {
-							log.Printf("[Hub] Error marshalling broadcast: %v", err)
-							return
-						}
-						select {
-						case c.send <- broadcastBytes:
-							h.stats.incrementMessagesSent()
-						case <-time.After(writeWait):
-							// If we timeout, handle as slow client
-							go h.handleSlowClient(c, channelName)
-						}
-					}(client)
-					break
+			// Check if we've already processed this message
+			if _, exists := h.processedMessages.LoadOrStore(broadcast.MessageID, true); exists {
+				continue
+			}
+
+			// Clean up old message IDs after a delay
+			go func(messageID string) {
+				time.Sleep(5 * time.Second)
+				h.processedMessages.Delete(messageID)
+			}(broadcast.MessageID)
+
+			// Get all active clients for this channel from Redis
+			ctx := context.Background()
+			clientIDs, err := h.storage.GetChannelClients(ctx, channelName)
+			if err != nil {
+				log.Println("Error getting channel clients", "error", err, "channel", channelName)
+				continue
+			}
+
+			// Send to local active connections
+			h.mu.RLock()
+			clients := h.channels[channelName]
+			for _, client := range clients {
+				// Skip if client is closing
+				if client.isClosing {
+					continue
+				}
+
+				// Only send if client is still subscribed according to Redis
+				for _, id := range clientIDs {
+					if id == client.ClientID {
+						// Use a separate goroutine to send with timeout
+						go func(c *Client) {
+							broadcastBytes, err := json.Marshal(map[string]interface{}{
+								"channel_name": broadcast.ChannelName,
+								"data":         json.RawMessage(broadcast.Data),
+								"sender_id":    broadcast.SenderID,
+								"timestamp":    broadcast.Timestamp.Format(time.RFC3339),
+								"message_id":   broadcast.MessageID,
+								"event":        broadcast.Event,
+							})
+							if err != nil {
+								log.Println("Error marshalling broadcast", "error", err)
+								return
+							}
+							select {
+							case c.send <- broadcastBytes:
+								h.stats.incrementMessagesSent()
+							case <-time.After(writeWait):
+								// If we timeout, handle as slow client
+								go h.handleSlowClient(c, channelName)
+							}
+						}(client)
+						break
+					}
 				}
 			}
+			h.mu.RUnlock()
 		}
-		h.mu.RUnlock()
 	}
 }
 
@@ -389,7 +410,7 @@ func (h *DefaultHub) handleUnsubscribe(sub Subscription) {
 
 	// Remove client from Redis channel first
 	if err := h.storage.RemoveClientFromChannel(context.Background(), sub.ChannelName, sub.Client.ClientID); err != nil {
-		log.Printf("[Hub] Error removing client from Redis channel: %v", err)
+		log.Println("Error removing client from Redis channel", "error", err, "clientID", sub.Client.ClientID, "channel", sub.ChannelName)
 	}
 
 	h.unsubscribeClientFromChannel(sub.Client, sub.ChannelName)
@@ -413,17 +434,19 @@ func (h *DefaultHub) handleBroadcast(b Broadcast) {
 
 	payload, err := json.Marshal(b)
 	if err != nil {
-		log.Printf("[Hub] Error marshalling broadcast: %v", err)
+		log.Println("Error marshalling broadcast", "error", err)
 		return
 	}
 
 	if err := h.messageBroker.Publish(context.Background(), b.ChannelName, payload); err != nil {
-		log.Printf("[Hub] Error publishing to broker: %v", err)
+		log.Println("Error publishing to broker", "error", err, "channel", b.ChannelName)
 	}
 }
 
 // handleSlowClient removes slow clients from a channel.
 func (h *DefaultHub) handleSlowClient(c *Client, channelName string) {
+	log.Println("Removing slow client from channel", "clientID", c.ClientID, "channel", channelName)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -432,12 +455,11 @@ func (h *DefaultHub) handleSlowClient(c *Client, channelName string) {
 		return
 	}
 
-	log.Printf("[Hub] Removing slow client %s from channel %s", c.ClientID, channelName)
 	h.unsubscribeClientFromChannel(c, channelName)
 
 	// Remove from Redis
-	if err := h.storage.RemoveClientFromChannel(context.Background(), channelName, c.ClientID); err != nil {
-		log.Printf("[Hub] Error removing client from Redis channel: %v", err)
+	if err := h.storage.RemoveClientFromChannel(context.Background(), c.ClientID, channelName); err != nil {
+		log.Println("Error removing client from Redis channel", "error", err, "clientID", c.ClientID, "channel", channelName)
 	}
 
 	c.Close()
@@ -448,25 +470,18 @@ func (h *DefaultHub) handleSlowClient(c *Client, channelName string) {
 
 // cleanupStaleConnections removes clients that have been inactive for too long.
 func (h *DefaultHub) cleanupStaleConnections() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.logger.Debug("Cleaning up stale connections", "channels", h.channels)
 
 	now := time.Now()
 	// staleTimeout := now.Add(-5 * time.Minute)
 	staleTimeout := now.Add(-10 * time.Second)
 
-	log.Println("cleanupStaleConnections: channels", h.channels)
 	for channelName, clients := range h.channels {
 		for _, client := range clients {
-			log.Println("client.LastSeen", client.LastSeen)
-			log.Println("staleTimeout", staleTimeout)
+			h.logger.Debug("Checking client last seen", "clientID", client.ClientID, "lastSeen", client.LastSeen, "staleTimeout", staleTimeout)
 			if client.LastSeen.Before(staleTimeout) {
-				log.Printf("[Cleanup] Removing stale client %s", client.ClientID)
-				h.unsubscribeClientFromChannel(client, channelName)
-				client.Close()
-				h.stats.mu.Lock()
-				h.stats.activeConnections--
-				h.stats.mu.Unlock()
+				h.logger.Debug("Removing stale client", "clientID", client.ClientID)
+				h.handleSlowClient(client, channelName)
 			}
 		}
 	}
@@ -474,19 +489,19 @@ func (h *DefaultHub) cleanupStaleConnections() {
 
 // logStats logs the current statistics of the Hub.
 func (h *DefaultHub) logStats() {
-	h.stats.mu.RLock()
-	defer h.stats.mu.RUnlock()
-
 	if !h.shouldLogStats {
 		return
 	}
 
-	log.Printf("[Stats] Active: %d, Total: %d, Sent: %d, Received: %d, Errors: %d",
-		h.stats.activeConnections,
-		h.stats.totalConnections,
-		h.stats.messagesSent,
-		h.stats.messagesReceived,
-		h.stats.errors)
+	h.stats.mu.RLock()
+	defer h.stats.mu.RUnlock()
+
+	h.logger.Info("Hub stats",
+		"activeConnections", h.stats.activeConnections,
+		"totalConnections", h.stats.totalConnections,
+		"messagesSent", h.stats.messagesSent,
+		"messagesReceived", h.stats.messagesReceived,
+		"errors", h.stats.errors)
 }
 
 // unsubscribeClientFromChannel removes a client from a specific channel.
@@ -497,7 +512,7 @@ func (h *DefaultHub) unsubscribeClientFromChannel(client *Client, channelName st
 
 			// Remove client from Redis channel storage
 			if err := h.storage.RemoveClientFromChannel(context.Background(), channelName, client.ClientID); err != nil {
-				log.Printf("[Hub] Error removing client from Redis channel: %v", err)
+				log.Println("Error removing client from Redis channel", "error", err, "clientID", client.ClientID, "channel", channelName)
 			}
 
 			if isPresenceChannel(channelName) {
@@ -513,23 +528,6 @@ func (h *DefaultHub) unsubscribeClientFromChannel(client *Client, channelName st
 
 // broadcastPresenceJoin notifies all clients of a new presence join.
 func (h *DefaultHub) broadcastPresenceJoin(sub Subscription) {
-	// Check if client is already in the channel according to Redis
-	// ctx := context.Background()
-	// clients, err := h.storage.GetChannelClients(ctx, sub.ChannelName)
-	// if err != nil {
-	// 	log.Printf("[Hub] Error checking channel clients: %v", err)
-	// 	return
-	// }
-
-	// Check if client is already in the channel
-	// for _, id := range clients {
-	// 	if id == sub.Client.UserID {
-	// 		fmt.Println("Client already joined, skip presence broadcast")
-	// 		// Client already joined, skip presence broadcast
-	// 		return
-	// 	}
-	// }
-
 	joinMsg := PresenceMessage{
 		Event:     "presence:join",
 		UserID:    sub.Client.UserID,
