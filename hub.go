@@ -445,7 +445,7 @@ func (h *DefaultHub) handleBroadcast(b Broadcast) {
 
 // handleSlowClient removes slow clients from a channel.
 func (h *DefaultHub) handleSlowClient(c *Client, channelName string) {
-	log.Println("Removing slow client from channel", "clientID", c.ClientID, "channel", channelName)
+	h.logger.Debug("Removing slow client from channel", "clientID", c.ClientID, "channel", channelName)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -459,7 +459,7 @@ func (h *DefaultHub) handleSlowClient(c *Client, channelName string) {
 
 	// Remove from Redis
 	if err := h.storage.RemoveClientFromChannel(context.Background(), c.ClientID, channelName); err != nil {
-		log.Println("Error removing client from Redis channel", "error", err, "clientID", c.ClientID, "channel", channelName)
+		h.logger.Error("Error removing client from Redis channel", "error", err, "clientID", c.ClientID, "channel", channelName)
 	}
 
 	c.Close()
